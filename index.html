@@ -97,12 +97,16 @@
     <!-- Load Firebase Modules and Core Logic -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        // FIX: Removed setLogLevel from firebase-auth.js import
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, addDoc, updateDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        // FIX: Added setLogLevel to firebase-firestore.js import
+        import { getFirestore, doc, getDoc, addDoc, updateDoc, collection, query, where, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- GLOBAL FIREBASE VARIABLES & SETUP ---
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        // FIX: Handle missing Firebase config on deployment
+        const firebaseConfigString = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+        const firebaseConfig = JSON.parse(firebaseConfigString);
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         let db = null;
@@ -131,12 +135,21 @@
          */
         async function initializeFirebase() {
             if (db) return; // Prevent double initialization
+            console.log("Starting Firebase Initialization...");
             try {
+                // FIX: Add validation check for deployment
+                if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
+                    console.error("Firebase config is missing or invalid!");
+                    throw new Error("Firebase configuration is missing or invalid. Cannot connect to the database.");
+                }
+
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                setLogLevel('debug'); // Enable detailed Firestore logging
 
                 onAuthStateChanged(auth, async (user) => {
+                    console.log("Auth state changed. User:", user ? user.uid : "None");
                     if (user) {
                         userId = user.uid;
                     } else if (initialAuthToken) {
@@ -147,6 +160,8 @@
                         userId = auth.currentUser.uid;
                     }
                     isAuthReady = true;
+                    console.log("Firebase Auth Ready. User ID:", userId);
+                    
                     // Set booking date minimum to today's date
                     const today = new Date().toISOString().substring(0, 10);
                     const bookingDateInput = document.getElementById('booking-date');
@@ -155,12 +170,19 @@
                         bookingDateInput.min = today;
                     }
                     // Initial load of slots after auth is ready
+                    console.log("Calling renderTimeSlots for the first time.");
                     renderTimeSlots(today);
                 });
 
             } catch (error) {
                 console.error("Firebase initialization failed:", error);
                 showNotification("Error initializing database.", "error");
+
+                // FIX: Show a user-facing error in the slot grid.
+                const timeSlotsGrid = document.getElementById('time-slots-grid');
+                if (timeSlotsGrid) {
+                    timeSlotsGrid.innerHTML = `<div class="col-span-full text-center text-red-500 font-bold p-4">Error: Cannot load booking system. Database connection failed.</div>`;
+                }
             }
         }
 
@@ -295,14 +317,25 @@
          * Renders the 24-hour time slot grid for a given date, fetching real-time availability.
          */
         async function renderTimeSlots(dateString) {
-            try {
-                if (!isAuthReady || !db) return;
-                
-                const timeSlotsGrid = document.getElementById('time-slots-grid');
-                if (!timeSlotsGrid) return;
-                
-                timeSlotsGrid.innerHTML = `<div class="col-span-4 text-center text-arena-cyan font-bold p-4">Checking Availability...</div>`;
+            console.log(`renderTimeSlots called for date: ${dateString}`);
+            const timeSlotsGrid = document.getElementById('time-slots-grid');
+            if (!timeSlotsGrid) {
+                console.error("Slot grid element not found!");
+                return;
+            }
 
+            // Check if Firebase is ready. If not, show loading and return.
+            if (!isAuthReady || !db) {
+                console.warn("renderTimeSlots called, but Firebase is not ready.");
+                // Ensure loading message is visible if called too early
+                timeSlotsGrid.innerHTML = `<div class="col-span-full text-center text-arena-cyan font-bold p-4">Initializing Booking System...</div>`;
+                return;
+            }
+            
+            // Show loading message while fetching data
+            timeSlotsGrid.innerHTML = `<div class="col-span-full text-center text-arena-cyan font-bold p-4">Checking Availability...</div>`;
+
+            try {
                 if (currentIntervalId) clearInterval(currentIntervalId);
                 
                 const selectedDate = new Date(dateString);
@@ -310,9 +343,11 @@
                 const dayType = isWeekend ? 'weekend' : 'weekday';
 
                 // Fetch current bookings for the selected date
+                console.log(`Fetching bookings from: ${PUBLIC_BOOKINGS_PATH} for date: ${dateString}`);
                 const bookingsRef = collection(db, PUBLIC_BOOKINGS_PATH);
                 const q = query(bookingsRef, where("date", "==", dateString));
                 const querySnapshot = await getDocs(q);
+                console.log(`Found ${querySnapshot.size} bookings for this date.`);
 
                 let bookedHours = [];
                 querySnapshot.forEach((doc) => {
@@ -321,7 +356,7 @@
                         bookedHours.push(...booking.slots);
                     }
                 });
-                // Remove duplicates and sort
+                
                 bookedHours = [...new Set(bookedHours)].sort((a, b) => a - b);
                 
                 let htmlContent = '';
@@ -377,6 +412,7 @@
                 }
                 
                 timeSlotsGrid.innerHTML = htmlContent;
+                console.log("Slot grid rendered successfully.");
 
                 // Start the countdown timer if today's bookings are being viewed
                 updateCurrentStatus(dateString, bookedHours);
@@ -387,8 +423,7 @@
 
             } catch (error) {
                 console.error("Error rendering time slots:", error);
-                const timeSlotsGrid = document.getElementById('time-slots-grid');
-                if (timeSlotsGrid) timeSlotsGrid.innerHTML = `<div class="col-span-4 text-center text-red-500 font-bold p-4">Error loading slots.</div>`;
+                timeSlotsGrid.innerHTML = `<div class="col-span-full text-center text-red-500 font-bold p-4">Error loading slots. Please check connection and refresh.</div>`;
             }
         }
 
@@ -784,17 +819,17 @@
         function cleanupModal() {
             if (currentIntervalId) clearInterval(currentIntervalId);
             const bookingDateInput = document.getElementById('booking-date');
-            if (bookingDateInput) renderTimeSlots(bookingDateInput.value); // Re-render to clear 'IN PLAY' timer
+            if (bookingDateInput && bookingDateInput.value) {
+                // Re-render slots for the *currently selected* date to clear any 'IN PLAY' timers
+                renderTimeSlots(bookingDateInput.value); 
+            }
             resetBookingModalView(); // Ensure booking modal is reset
+            
+            // Reset game setup modal
             document.getElementById('game-error-msg').textContent = '';
             document.getElementById('booking-id-input').value = '';
-            
-            // FIX: Reset game setup UI when closing modal.
             document.getElementById('booking-id-entry-container')?.classList.remove('hidden');
-            document.getElementById('game-setup-content').innerHTML = `
-                 <h3 class="text-xl font-bold text-white mb-4">Match Setup / Report Score</h3>
-                 <p class="text-gray-400 mb-6">Enter your Booking ID to continue.</p>
-            `;
+            document.getElementById('game-setup-content').innerHTML = '';
         }
 
         /**
@@ -827,6 +862,13 @@
                     }
                     // Ensure form view is displayed when opening
                     resetBookingModalView();
+                    
+                    // Explicitly re-render slots when modal is opened
+                    // to ensure they are fresh
+                    const bookingDateInput = document.getElementById('booking-date');
+                    if (bookingDateInput && bookingDateInput.value) {
+                         renderTimeSlots(bookingDateInput.value);
+                    }
                 };
                 
                 // --- Modal Control Listeners (Fixed duplicate ID issue) ---
@@ -906,7 +948,7 @@
                 </div>
                 <!-- Desktop Navigation -->
                 <nav class="hidden md:flex space-x-8 font-medium">
-                    <a href="#hero" class="hover:text-arena-cyan transition duration-150">Home</a>
+                    <a href="#how-it-works" class="hover:text-arena-cyan transition duration-150">How It Works</a>
                     <a href="#activities" class="hover:text-arena-cyan transition duration-150">Amenities</a>
                     <a href="#pricing" class="hover:text-arena-cyan transition duration-150">Rates</a>
                     <a href="#policies" class="hover:text-arena-cyan transition duration-150">Policies</a>
@@ -927,7 +969,7 @@
         <!-- Mobile Navigation Menu -->
         <nav id="mobile-menu" class="hidden md:hidden absolute w-full bg-arena-dark shadow-xl pb-4">
             <div class="px-2 pt-2 pb-3 space-y-1 sm:px-3 flex flex-col items-center">
-                <a href="#hero" onclick="closeMenu()" class="block px-3 py-2 rounded-md text-base font-medium hover:bg-arena-dark-accent">Home</a>
+                <a href="#how-it-works" onclick="closeMenu()" class="block px-3 py-2 rounded-md text-base font-medium hover:bg-arena-dark-accent">How It Works</a>
                 <a href="#activities" onclick="closeMenu()" class="block px-3 py-2 rounded-md text-base font-medium hover:bg-arena-dark-accent">Amenities</a>
                 <a href="#pricing" onclick="closeMenu()" class="block px-3 py-2 rounded-md text-base font-medium hover:bg-arena-dark-accent">Rates</a>
                 <a href="#policies" onclick="closeMenu()" class="block px-3 py-2 rounded-md text-base font-medium hover:bg-arena-dark-accent">Policies</a>
@@ -941,6 +983,44 @@
     </header>
 
     <main>
+        <!-- NEW: "How It Works" Section for User-Friendliness -->
+        <section id="how-it-works" class="py-16 md:py-20 bg-arena-dark-accent">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h2 class="text-3xl font-bold text-center mb-12 text-white">How It Works: <span class="arena-gradient-text">3 Easy Steps</span></h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
+                    
+                    <!-- Step 1: Book -->
+                    <div class="flex flex-col items-center">
+                        <div class="flex items-center justify-center w-20 h-20 mb-4 bg-arena-cyan rounded-full shadow-lg">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white mb-2">1. Book Your Slot</h3>
+                        <p class="text-gray-400">Click 'Book Turf', pick your date and time slots, and fill in your details.</p>
+                    </div>
+
+                    <!-- Step 2: Pay -->
+                    <div class="flex flex-col items-center">
+                        <div class="flex items-center justify-center w-20 h-20 mb-4 bg-arena-green rounded-full shadow-lg">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H7a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white mb-2">2. Pay & Confirm</h3>
+                        <p class="text-gray-400">Scan the QR code or use the UPI link to pay, then click 'I have Paid' to confirm.</p>
+                    </div>
+
+                    <!-- Step 3: Play & Report -->
+                    <div class="flex flex-col items-center">
+                        <div class="flex items-center justify-center w-20 h-20 mb-4 bg-arena-peak rounded-full shadow-lg">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12 12 0 0012 21.055a12 12 0 008.618-15.04z"></path></svg>
+                        </div>
+                        <h3 class="text-2xl font-bold text-white mb-2">3. Play & Report</h3>
+                        <p class="text-gray-400">After your match, use 'Report Score' with your Booking ID to set team names and share the results.</p>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+
         <!-- Hero Section - FIX: Changed background to bg-arena-dark to blend with body background -->
         <section id="hero" class="relative overflow-hidden pt-20 pb-20 md:pt-32 md:pb-40 text-center bg-arena-dark">
             <!-- Background Overlay and Effects -->
@@ -1198,8 +1278,9 @@
                     <!-- Time Slot Grid -->
                     <div>
                         <h3 class="text-xl font-bold text-white mb-4 mt-4">Select Hourly Slots (Continuous)</h3>
+                        <!-- FIX: Added col-span-full to the loading message -->
                         <div id="time-slots-grid" class="grid grid-cols-4 sm:grid-cols-6 lg:grid-cols-8 xl:grid-cols-12 gap-3">
-                            <!-- Slots will be injected here by JavaScript -->
+                            <div class="col-span-full text-center text-arena-cyan font-bold p-4">Initializing Booking System...</div>
                         </div>
                         <p id="booking-error-msg" class="text-red-500 mt-3 text-sm font-semibold h-5"></p>
                     </div>
